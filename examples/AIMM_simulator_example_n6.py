@@ -4,6 +4,8 @@
 from sys import stderr
 from numpy.random import seed
 from AIMM_simulator import Sim,Logger,Scenario
+import signal
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
 class MyScenario(Scenario):
   def loop(self):
@@ -19,6 +21,7 @@ class MyScenario(Scenario):
     for i in range(9,29):   # set subband mask for small cells
       self.sim.cells[i].set_subband_mask([0,1,1,1])
     print(f'cells masked at t={self.sim.env.now:.2f}',file=stderr)
+    yield self.sim.wait(20)
 
 class MyLogger(Logger):
   def loop(self):
@@ -26,6 +29,7 @@ class MyLogger(Logger):
       ave=self.sim.get_average_throughput()
       self.f.write(f'{self.sim.env.now:.2f}\t{ave:.4}\n')
       yield self.sim.wait(self.logging_interval)
+    yield self.sim.wait(100 - self.sim.env.now)
 
 def hetnet():
   sim=Sim()

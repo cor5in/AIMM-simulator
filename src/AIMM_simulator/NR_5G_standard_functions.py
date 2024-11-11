@@ -1,9 +1,16 @@
+# Geon Kim 2024-11-11: 업데이트 필요 영역
+## 1. eMBB/URLLC/mMTC 시나리오별 최적화
+## 2. 새로운 프레임 구조 지원
+## 3. Multi-TRP 동작
+## 4. Enhanced mobility 지원
+## 5. IAB(Integrated Access and Backhaul) 기
+
 # Keith Briggs 2020-10-13
 # Keith Briggs 2020-09-21
 # map rsrp to reported value: 5G in Bullets p389 Table 237
 # map SINR to CQI: https://uk.mathworks.com/help/5g/ug/5g-nr-cqi-reporting.html
 
-from sys import exit
+from sys import exit능
 from bisect import bisect
 from math import floor,ceil,log2
 from functools import lru_cache
