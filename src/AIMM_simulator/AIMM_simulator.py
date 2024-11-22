@@ -1,4 +1,4 @@
-# Keith Briggs 2022-11-11 2.0 version
+# Geon Kim 2024-11-12 Version
 # Simulation structure:
 # Sim - Scenario - MME
 # |
@@ -8,32 +8,34 @@
 # |       |      |
 # UE UE  UE UE  UE UE ...
 
-__version__='2.0.3'
+from .UMa_pathloss_model import UMa_pathloss
+from collections import deque
+from os.path import basename
+__version__ = '2.0.3'
 '''The AIMM simulator emulates a cellular radio system roughly following 5G concepts and channel models.'''
 
-from os.path import basename
-from sys import stderr,stdout,exit,version as pyversion
-from math import hypot,atan2,pi as math_pi
-from time import time,sleep
-from collections import deque
+from sys import stderr, stdout, exit, version as pyversion
+from math import hypot, atan2, pi as math_pi
+from time import time, sleep
 try:
   import numpy as np
 except:
-  print('numpy not found: please do "pip install numpy"',file=stderr)
+  print('numpy not found: please do "pip install numpy"', file=stderr)
   exit(1)
 try:
   import simpy
 except:
-  print('simpy not found: please do "pip install simpy"',file=stderr)
+  print('simpy not found: please do "pip install simpy"', file=stderr)
   exit(1)
-from .NR_5G_standard_functions import SINR_to_CQI,CQI_to_64QAM_efficiency
-from .UMa_pathloss_model import UMa_pathloss
+from .NR_5G_standard_functions import SINR_to_CQI, CQI_to_64QAM_efficiency
+
 
 def np_array_to_str(x):
   ' Formats a 1-axis np.array as a tab-separated string '
-  return np.array2string(x,separator='\t').replace('[','').replace(']','')
+  return np.array2string(x, separator='\t').replace('[', '').replace(']', '')
 
-def _nearest_weighted_point(x,pts,w=1.0):
+
+def _nearest_weighted_point(x, pts, w=1.0):
   '''
   Internal use only.
   Given a point x of shape (dim,), where dim is typically 2 or 3,
@@ -49,253 +51,422 @@ def _nearest_weighted_point(x,pts,w=1.0):
   exponent, then this algorithm will give us the index of the cell providing
   largest received power at the point x.
   '''
-  weighted_distances=w*np.linalg.norm(pts-x,axis=1)
-  imin=np.argmin(weighted_distances)
-  if 0: # dbg
-    print('x=',x)
-    print('pts=',pts)
-    print('weighted_distances=',weighted_distances)
-  return weighted_distances[imin],imin
+  weighted_distances = w * np.linalg.norm(pts - x, axis=1)
+  imin = np.argmin(weighted_distances)
+  if 0:  # dbg
+    print('x=', x)
+    print('pts=', pts)
+    print('weighted_distances=', weighted_distances)
+  return weighted_distances[imin], imin
+
 
 def to_dB(x):
-  return 10.0*np.log10(x)
+  return 10.0 * np.log10(x)
+
 
 def from_dB(x):
-  return np.power(10.0,x/10.0)
+  return np.power(10.0, x / 10.0)
+
 
 class Cell:
-  '''
-  Class representing a single Cell (gNB).  As instances are created, the are automatically given indices starting from 0.  This index is available as the data member ``cell.i``.   The variable ``Cell.i`` is always the current number of cells.
+ '''
+ Class representing a single Cell (gNB). As instances are created, they are automatically given indices starting from 0.
+ This index is available as the data member ``cell.i``. The variable ``Cell.i`` is always the current number of cells.
 
-  Parameters
-  ----------
-  sim : Sim
-    Simulator instance which will manage this Cell.
-  interval : float
-    Time interval between Cell updates.
-  bw_MHz : float
-    Channel bandwidth in MHz.
-  n_subbands : int
-    Number of subbands.
-  xyz : [float, float, float]
-    Position of cell in metres, and antenna height.
-  h_BS : float
-    Antenna height in metres; only used if xyz is not provided.
-  power_dBm : float
-    Transmit power in dBm.
-  MIMO_gain_dB : float
-    Effective power gain from MIMO in dB.  This is no more than a crude way to
-    estimate the performance gain from using MIMO.  A typical value might be 3dB for 2x2 MIMO.
-  pattern : array or function
-    If an array, then a 360-element array giving the antenna gain in dB in 1-degree increments (0=east, then counterclockwise).  Otherwise, a function giving the antenna gain in dB in the direction theta=(180/pi)*atan2(y,x).
-  f_callback :
-    A function with signature ``f_callback(self,kwargs)``, which will be called
-    at each iteration of the main loop.
-  verbosity : int
-      Level of debugging output (0=none).
-  '''
-  i=0
+ Parameters
+ ----------
+ sim : Sim
+   Simulator instance which will manage this Cell.
+ interval : float
+   Time interval between Cell updates (default 15 minutes = 900 seconds).
+ xyz : [float, float, float]
+   Position of cell in metres, and antenna height.
+ h_BS : float
+   Antenna height in metres; only used if xyz is not provided.
+ MIMO_gain_dB : float
+   Effective power gain from MIMO in dB. A typical value might be 3dB for 2x2 MIMO.
+ pattern : array or function
+   If an array, then a 360-element array giving the antenna gain in dB in 1-degree increments (0=east, then counterclockwise).
+   Otherwise, a function giving the antenna gain in dB in the direction theta=(180/pi)*atan2(y,x).
+ f_callback :
+   A function with signature ``f_callback(self,kwargs)``, which will be called at each iteration of the main loop.
+ verbosity : int
+   Level of debugging output (0=none).
+ '''
+ i = 0
 
-  def __init__(s,
-               sim,
-               interval=10.0,
-               bw_MHz=10.0,
-               n_subbands=1,
-               xyz=None,
-               h_BS=20.0,
-               power_dBm=30.0,
-               MIMO_gain_dB=0.0,
-               pattern=None,
-               f_callback=None,
-               f_callback_kwargs={},
-               verbosity=0):
-    # default scene 1000m x 1000m, but keep cells near the centre
-    s.i=Cell.i; Cell.i+=1
-    s.sim=sim
-    s.interval=interval
-    s.bw_MHz=bw_MHz
-    s.n_subbands=n_subbands
-    s.subband_mask=np.ones(n_subbands) # dtype is float, to allow soft masking
-    s.rbs=simpy.Resource(s.sim.env,capacity=50)
-    s.power_dBm=power_dBm
-    s.pattern=pattern
-    s.f_callback=f_callback
-    s.f_callback_kwargs=f_callback_kwargs
-    s.MIMO_gain_dB=MIMO_gain_dB
-    s.attached=set()
-    s.reports={'cqi': {}, 'rsrp': {}, 'throughput_Mbps': {}}
-    # rsrp_history[i] will be the last 10 reports of rsrp received
-    # at this cell from UE[i] (no timestamps, just for getting trend)
-    s.rsrp_history={}
-    if xyz is not None:
-      s.xyz=np.array(xyz)
-    else: # random cell locations
-      s.xyz=np.empty(3)
-      s.xyz[:2]=100.0+900.0*s.sim.rng.random(2)
-      s.xyz[2]=h_BS
-    if verbosity>1: print(f'Cell[{s.i}] is at',s.xyz,file=stderr)
-    s.verbosity=verbosity
-    # every time we make a new Cell, we have to check whether
-    # we have a hetnet or not...
-    s.sim._set_hetnet()
-    #s.sim.env.process(s.loop()) # start Cell main loop
+ def __init__(s,
+              sim,
+              interval=15 * 60,  # 15분을 초단위로 변환
+              xyz=None,
+              h_BS=20.0,
+              MIMO_gain_dB=0.0,
+              pattern=None,
+              f_callback=None,
+              f_callback_kwargs={},
+              verbosity=0):
 
-  def set_f_callback(s,f_callback,**kwargs):
-    ' Add a callback function to the main loop of this Cell '
-    s.f_callback=f_callback
-    s.f_callback_kwargs=kwargs
+   s.i = Cell.i; Cell.i += 1
+   s.sim = sim
+   s.interval = interval  # 15분 간격
 
-  def loop(s):
-    '''
-      Main loop of Cell class.  Default: do nothing.
-    '''
+   # 에너지 소비 추적을 위한 설정
+   s.energy_per_interval = 25  # Wh (100Wh/4intervals = 25Wh per 15min)
+
+   # 주파수 대역별 설정
+   s.freq_config = {
+    800: {
+        'bandwidth': 10.0,
+        'n_RBs': 50,
+        'active': False
+    },
+    1800: {
+        'bandwidth': 20.0,
+        'n_RBs': 100,
+        'active': False
+    },
+    3600: {
+        'bandwidth': 100.0,
+        'n_RBs': 500,
+        'active': False
+    }
+  }
+
+   # 초기 활성 주파수와 총 에너지 소비
+   s.active_freqs = set()
+   s.freq_users = {freq: set() for freq in s.freq_config} # 주파수별 연결된 UE
+   s.total_energy_consumed = 0  # 총 에너지 소비 (Wh)
+   s.intervals_count = 0  # 15분 간격 카운트
+
+   # 주파수별 RB 수 초기화
+   s.rb_masks = {
+       freq: np.ones(config['n_RBs'])
+       for freq, config in s.freq_config.items()
+   }
+
+   s.base_power_W = 130.0  # 상시 전력 (W)
+   s.frequency_power_W = 100.0  # 주파수당 추가 전력 (W)
+   s.total_energy_consumed = 0.0  # 총 에너지 소비량 (Wh)
+
+   s.rbs = simpy.Resource(s.sim.env, capacity=50)
+   s.pattern = pattern
+   s.f_callback = f_callback
+   s.f_callback_kwargs = f_callback_kwargs
+   s.MIMO_gain_dB = MIMO_gain_dB
+   s.attached = set()
+
+   # 주파수별 리포트 관리
+   s.reports = {freq: {'cqi': {}, 'rsrp': {}, 'throughput_Mbps': {}}
+               for freq in s.freq_config.keys()}
+   s.rsrp_history = {freq: {} for freq in s.freq_config.keys()}
+
+   if xyz is not None:
+     s.xyz = np.array(xyz)
+   else:
+     s.xyz = np.empty(3)
+     s.xyz[:2] = 100.0 + 900.0 * s.sim.rng.random(2)
+     s.xyz[2] = h_BS
+
+   if verbosity > 1: print(f'Cell[{s.i}] is at', s.xyz, file=stderr)
+   s.verbosity = verbosity
+   s.sim._set_hetnet()
+
+
+
+ def update_energy_consumption(s):
+   """15분 간격으로 에너지 소비 업데이트"""
+   active_count = len(s.active_freqs)
+   energy_this_interval = s.energy_per_interval * active_count  # 25Wh * 활성 대역 수
+
+   s.total_energy_consumed += energy_this_interval
+   s.intervals_count += 1
+
+   # 활성화된 주파수 대역별로 에너지 소비 기록
+   for freq in s.active_freqs:
+       s.freq_config[freq]['energy_consumed'] += s.energy_per_interval
+
+ def get_hourly_energy_consumption(s):
+   """시간당 에너지 소비량 계산"""
+   hourly_rate = len(s.active_freqs) * 100  # 시간당 100Wh * 활성 대역 수
+   return hourly_rate
+
+ def get_energy_stats(s):
+   """에너지 소비 통계 반환"""
+   hours_elapsed = s.intervals_count / 4  # 15분 간격을 시간으로 변환
+   return {
+       'total_energy_consumed': s.total_energy_consumed,  # 총 에너지 소비 (Wh)
+       'hours_elapsed': hours_elapsed,
+       'active_bands': len(s.active_freqs),
+       'hourly_consumption_rate': s.get_hourly_energy_consumption(),
+       'per_frequency': {
+           freq: {
+               'active': s.freq_config[freq]['active'],
+               'energy_consumed': s.freq_config[freq]['energy_consumed']  # Wh
+           }
+           for freq in s.freq_config
+       }
+   }
+
+  # Cell 클래스에 새로운 메서드 추가
+  def get_frequency_priority(self, service_type):
+    """
+    서비스 타입에 따른 주파수 우선순위 반환
+    """
+    # 음성 통화인 경우 커버리지 우선
+    if service_type == "voice":
+        return [800, 1800, 3600] 
+    
+    # 데이터 서비스인 경우 대역폭/용량 우선  
+    elif service_type == "data":
+        # 커버리지를 고려한 가중치 적용
+        weights = {
+            800: 1.0,   # 기본 커버리지
+            1800: 0.8,  # 중간 커버리지  
+            3600: 0.6   # 제한된 커버리지
+        }
+        
+        # 각 주파수별 실제 사용 가능한 용량 계산
+        available_capacity = {}
+        for freq in self.freq_config:
+            bandwidth = self.freq_config[freq]['bandwidth']
+            coverage_weight = weights[freq]
+            available_capacity[freq] = bandwidth * coverage_weight
+            
+        # 용량 기준 내림차순 정렬
+        return sorted(available_capacity, key=available_capacity.get, reverse=True)
+
+
+
+
+ def activate_frequency(s, freq):
+   """주파수 대역 활성화"""
+   if freq in s.freq_config and not s.freq_config[freq]['active']:
+       s.freq_config[freq]['active'] = True
+       s.active_freqs.add(freq)
+       return True
+   return False
+
+ def deactivate_frequency(s, freq):
+   """주파수 대역 비활성화"""
+   if freq in s.freq_config and s.freq_config[freq]['active']:
+       s.freq_config[freq]['active'] = False
+       s.active_freqs.remove(freq)
+       return True
+   return False
+
+ def set_frequency(s, freq):
+   """활성 주파수 변경"""
+   if freq in s.freq_config and s.freq_config[freq]['active']:
+       s.active_freq = freq
+       return True
+   return False
+
+ def get_active_frequencies(s):
+   """활성화된 주파수 대역 목록 반환"""
+   return list(s.active_freqs)
+
+ def set_rb_mask(s, mask, freq=None):
+   """특정 주파수의 RB 마스크 설정"""
+   if freq is None:
+       freq = min(s.active_freqs) if s.active_freqs else list(s.freq_config.keys())[0]
+   if freq in s.freq_config:
+       if len(mask) == s.freq_config[freq]['n_RBs']:
+           s.rb_masks[freq] = np.array(mask)
+           return True
+   return False
+
+ def get_rb_mask(s, freq=None):
+   """특정 주파수의 RB 마스크 반환"""
+   if freq is None:
+       freq = min(s.active_freqs) if s.active_freqs else list(s.freq_config.keys())[0]
+   return s.rb_masks.get(freq)
+
+ def get_rsrp(s, i, freq=None):
+   """주파수별 RSRP 반환"""
+   if freq is None:
+       freq = min(s.active_freqs) if s.active_freqs else list(s.freq_config.keys())[0]
+   if not s.freq_config[freq]['active']:
+       return -np.inf
+   if i in s.reports[freq]['rsrp']:
+       rsrp = s.reports[freq]['rsrp'][i][1]
+       freq_factor = (freq/800.0)**2
+       return rsrp - 10*np.log10(freq_factor)
+   return -np.inf
+
+ def get_UE_throughput(s, ue_i, freq=None):  
+   """주파수별 UE 처리량 반환"""
+   if freq is None:
+       freq = min(s.active_freqs) if s.active_freqs else list(s.freq_config.keys())[0]
+   reports = s.reports[freq]['throughput_Mbps']
+   if ue_i in reports:
+       # RB 기반 처리량 계산
+       n_rbs = s.freq_config[freq]['n_RBs']
+       rb_mask = s.rb_masks[freq]
+       return reports[ue_i][1] * (rb_mask.sum() / n_rbs)
+   return -np.inf
+
+ def get_UE_CQI(s, ue_i, freq=None):
+   """주파수별 CQI 반환"""
+   if freq is None:
+       freq = min(s.active_freqs) if s.active_freqs else list(s.freq_config.keys())[0]
+   reports = s.reports[freq]['cqi']
+   return reports[ue_i][1] if ue_i in reports else np.nan*np.ones(s.freq_config[freq]['n_subbands'])
+
+ def set_pattern(s,pattern):
+   """Set the antenna radiation pattern."""
+   s.pattern = pattern
+
+ def set_MIMO_gain(s,MIMO_gain_dB): 
+   """Set the MIMO gain in dB."""
+   s.MIMO_gain_dB = MIMO_gain_dB
+
+ def get_xyz(s):
+   """Return cell position."""
+   return s.xyz
+
+ def set_xyz(s,xyz):
+   """Set cell position."""
+   s.xyz = np.array(xyz)
+   s.sim.cell_locations[s.i] = s.xyz
+   print(f'Cell[{s.i}] is now at {s.xyz}',file=stderr)
+
+ def get_nattached(s):
+   """Return number of attached UEs."""
+   return len(s.attached)
+
+ def loop(s):
     while True:
-      if s.f_callback is not None: s.f_callback(s,**s.f_callback_kwargs)
-      yield s.sim.env.timeout(s.interval)
+        num_active_freqs = len(s.active_freqs)
+        total_power_W = s.base_power_W + s.frequency_power_W * num_active_freqs
+        energy_consumed = total_power_W * (s.interval / 3600)
+        s.total_energy_consumed += energy_consumed
 
-  def __repr__(s):
-    return f'Cell(index={s.i},xyz={s.xyz})'
+        # Callback
+        if s.f_callback is not None:
+            s.f_callback(s, **s.f_callback_kwargs)
+        yield s.sim.env.timeout(s.interval)
 
-  def get_nattached(s):
-    '''
-    Return the current number of UEs attached to this Cell.
-    '''
-    return len(s.attached)
+ def monitor_rbs(s):
+   while True:
+     if s.rbs.queue:
+       if s.verbosity>0: print(f'rbs at {s.sim.env.now:.2f} ={s.rbs.count}')
+     yield s.sim.env.timeout(5.0)
 
-  def get_xyz(s):
-    '''
-    Return the current position of this Cell.
-    '''
-    return s.xyz
+ def __repr__(s):
+   return f'Cell(index={s.i},xyz={s.xyz})'
 
-  def set_xyz(s,xyz):
-    '''
-    Set a new position for this Cell.
-    '''
-    s.xyz=np.array(xyz)
-    s.sim.cell_locations[s.i]=s.xyz
-    print(f'Cell[{s.i}]   is now at {s.xyz}',file=stderr)
+ def select_frequency_by_qos(self, ue, service_type, qos_requirement):
+    """
+    QoS 요구사항을 고려한 주파수 선택
+    """
+    priorities = self.get_frequency_priority(service_type)
+    
+    for freq in priorities:
+        if not self.freq_config[freq]['active']:
+            continue
+            
+        # 해당 주파수 대역의 현재 로드 확인
+        current_load = self.get_frequency_load(freq)
+        
+        # QoS 만족 가능 여부 체크
+        if self.can_satisfy_qos(freq, current_load, qos_requirement):
+            return freq
+            
+    return None  # 적절한 주파수를 찾지 못한 경우
 
-  def get_power_dBm(s):
-    '''
-    Return the transmit power in dBm currently used by this cell.
-    '''
-    return s.power_dBm
+  def select_frequency_by_qos(self, ue, service_type, qos_requirement):
+    """
+    QoS 요구사항을 고려한 주파수 선택
+    """
+    priorities = self.get_frequency_priority(service_type)
+    
+    for freq in priorities:
+        if not self.freq_config[freq]['active']:
+            continue
+            
+        # 해당 주파수 대역의 현재 로드 확인
+        current_load = self.get_frequency_load(freq)
+        
+        # QoS 만족 가능 여부 체크
+        if self.can_satisfy_qos(freq, current_load, qos_requirement):
+            return freq
+            
+    return None  # 적절한 주파수를 찾지 못한 경우
 
-  def set_power_dBm(s,p):
-    '''
-    Set the transmit power in dBm to be used by this cell.
-    '''
-    s.power_dBm=p
-    s.sim._set_hetnet()
+  def can_satisfy_qos(self, freq, current_load, qos_requirement):
+    """주파수별 QoS 만족 여부 확인"""
+    available_bandwidth = self.freq_config[freq]['bandwidth'] * (1 - current_load)
+    required_bandwidth = qos_requirement.get('min_bandwidth', 0)
+    return available_bandwidth >= required_bandwidth
 
-  def boost_power_dBm(s,p,mn=None,mx=None):
-    '''
-    Increase or decrease (if p<0) the transmit power in dBm to be used by this cell.
-    If mn is not ``None``, then the power will not be set if it falls below mn.
-    If mx is not ``None``, then the power will not be set if it exceeds mx.
-    Return the new power.
-    '''
-    if p<0.0:
-      if mn is not None and s.power_dBm+p>=mn:
-        s.power_dBm+=p
-      return s.power_dBm
-    if p>0.0:
-      if mx is not None and s.power_dBm+p<=mx:
-        s.power_dBm+=p
-      return s.power_dBm
-    s.power_dBm+=p
-    return s.power_dBm
+  def get_frequency_load(s, freq):
+    """주파수별 현재 RB 사용률 계산"""
+    if not s.freq_config[freq]['active']:
+        return 1.0  # 비활성 주파수는 최대 부하로 표시
+        
+    total_rbs = s.freq_config[freq]['n_RBs']
+    used_rbs = sum(1 for rb in s.rb_masks[freq] if rb == 1)
+    return used_rbs / total_rbs
 
-  def get_rsrp(s,i):
-    '''
-    Return last RSRP reported to this cell by UE[i].
-    '''
-    if i in s.reports['rsrp']:
-      return s.reports['rsrp'][i][1]
-    return -np.inf # no reports
+  def get_frequency_users(self, freq):
+      """주파수별 연결된 UE 목록"""
+      return self.freq_users.get(freq, set())
 
-  def get_rsrp_history(s,i):
-    '''
-    Return an array of the last 10 RSRP[1]s reported to this cell by UE[i].
-    '''
-    if i in s.rsrp_history:
-      return np.array(s.rsrp_history[i])
-    return -np.inf*np.ones(10) # no recorded history
+  def evaluate_handover_target(self, ue):
+    """
+    다중 주파수 환경에서의 핸드오버 타겟 평가
+    """
+    candidate_cells = []
+    
+    for neighbor_cell in self.get_neighbor_cells():
+        for freq in neighbor_cell.active_freqs:
+            rsrp = ue.measure_rsrp(neighbor_cell, freq)
+            load = neighbor_cell.get_frequency_load(freq)
+            
+            score = self.calculate_handover_score(rsrp, load, freq)
+            candidate_cells.append({
+                'cell': neighbor_cell,
+                'frequency': freq, 
+                'score': score
+            })
+    
+    # 점수 기준 정렬
+    return sorted(candidate_cells, key=lambda x: x['score'], reverse=True)  
 
-  def set_MIMO_gain(s,MIMO_gain_dB):
-    '''
-    Set the MIMO gain in dB to be used by this cell.
-    '''
-    s.MIMO_gain_dB=MIMO_gain_dB
+  def calculate_handover_score(self, rsrp, load, freq):
+    """핸드오버 후보 평가 점수 계산"""
+    coverage_weight = {800: 1.0, 1800: 0.8, 3600: 0.6}
+    return rsrp * coverage_weight[freq] * (1 - load)
 
-  def get_UE_throughput(s,ue_i): # FIXME do we want an array over subbands?
-    '''
-    Return the total current throughput in Mb/s of UE[i] in the simulation.
-    The value -np.inf indicates that there is no current report.
-    '''
-    reports=s.reports['throughput_Mbps']
-    if ue_i in reports: return reports[ue_i][1]
-    return -np.inf # special value to indicate no report
+  def generate_frequency_metrics(self):
+    """
+    주파수별 성능 지표 생성
+    """
+    metrics = {}
+    for freq in self.freq_config:
+        if not self.freq_config[freq]['active']:
+            continue
+             d
+        metrics[freq] = {
+            'capacity_utilization': self.get_frequency_load(freq),
+            'connected_users': len(self.get_frequency_users(freq)),
+            'average_throughput': self.calculate_avg_throughput(freq),
+            'energy_efficiency': self.calculate_energy_efficiency(freq)
+        }
+    
+    return metrics
 
-  def get_UE_CQI(s,ue_i):
-    '''
-    Return the current CQI of UE[i] in the simulation, as an array across all subbands.  An array of NaNs is returned if there is no report.
-    '''
-    reports=s.reports['cqi']
-    return reports[ue_i][1] if ue_i in reports else np.nan*np.ones(s.n_subbands)
+  def calculate_energy_efficiency(self, freq):
+    """주파수별 에너지 효율성 계산"""
+    if not self.freq_config[freq]['active']:
+        return 0
+    
+    total_throughput = self.calculate_avg_throughput(freq) * len(self.freq_users[freq])
+    energy_consumed = self.freq_config[freq]['energy_consumed']
+    return total_throughput / energy_consumed if energy_consumed > 0 else 0
 
-  def get_RSRP_reports(s):
-    '''
-    Return the current RSRP reports to this cell, as a list of tuples (ue.i, rsrp).
-    '''
-    reports=s.reports['rsrp']
-    return [(ue.i,reports[ue.i][1]) if ue.i in reports else (ue.i,-np.inf) for ue in s.sim.UEs]
-
-  def get_RSRP_reports_dict(s):
-    '''
-    Return the current RSRP reports to this cell, as a dictionary ue.i: rsrp.
-    '''
-    reports=s.reports['rsrp']
-    return dict((ue.i,reports[ue.i][1]) if ue.i in reports else (ue.i,-np.inf) for ue in s.sim.UEs)
-
-  def get_average_throughput(s):
-    '''
-    Return the average throughput over all UEs attached to this cell.
-    '''
-    reports,k=s.reports['throughput_Mbps'],0
-    ave=np.zeros(s.n_subbands)
-    for ue_i in reports:
-      k+=1
-      #ave+=(reports[ue_i][1][0]-ave)/k
-      ave+=(np.sum(reports[ue_i][1])-ave)/k
-    return np.sum(ave)
-
-  def set_pattern(s,pattern):
-    '''
-    Set the antenna radiation pattern.
-    '''
-    s.pattern=pattern
-
-  def set_subband_mask(s,mask):
-    '''
-    Set the subband mask to ``mask``.
-    '''
-    #print('set_subband_mask',s.subband_mask.shape,len(mask),file=stderr)
-    assert s.subband_mask.shape[0]==len(mask)
-    s.subband_mask=np.array(mask)
-
-  def get_subband_mask(s):
-    '''
-    Get the current subband mask.
-    '''
-    return s.subband_mask
-
-  def monitor_rbs(s):
-    while True:
-      if s.rbs.queue:
-        if s.verbosity>0: print(f'rbs at {s.sim.env.now:.2f} ={s.rbs.count}')
-      yield s.sim.env.timeout(5.0)
+  
+  
 # END class Cell
 
 class UE:
