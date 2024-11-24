@@ -95,7 +95,7 @@ class Cell:
  '''
  i = 0
 
- def __init__(s,
+ def __init__(self,
               sim,
               interval=15 * 60,  # 15분을 초단위로 변환
               xyz=None,
@@ -106,104 +106,207 @@ class Cell:
               f_callback_kwargs={},
               verbosity=0):
 
-   s.i = Cell.i; Cell.i += 1
-   s.sim = sim
-   s.interval = interval  # 15분 간격
+   self.i = Cell.i; Cell.i += 1
+   self.sim = sim
+   self.interval = interval  # 15분 간격
 
    # 에너지 소비 추적을 위한 설정
-   s.energy_per_interval = 25  # Wh (100Wh/4intervals = 25Wh per 15min)
+   self.energy_per_interval = 25  # Wh (100Wh/4intervals = 25Wh per 15min)
 
    # 주파수 대역별 설정
-   s.freq_config = {
-    800: {
-        'bandwidth': 10.0,
-        'n_RBs': 50,
-        'active': False
-    },
-    1800: {
-        'bandwidth': 20.0,
-        'n_RBs': 100,
-        'active': False
-    },
-    3600: {
-        'bandwidth': 100.0,
-        'n_RBs': 500,
-        'active': False
-    }
-  }
+   self.freq_config = {  
+            800: {
+                'bandwidth': 10.0,
+                'n_RBs': 50, 
+                'active': False,
+                'energy_consumed': 0.0
+            },
+            1800: {
+                'bandwidth': 20.0, 
+                'n_RBs': 100,
+                'active': False,
+                'energy_consumed': 0.0
+            },
+            3600: {
+                'bandwidth': 100.0,
+                'n_RBs': 500,
+                'active': False,
+                'energy_consumed': 0.0
+            }
+        }
 
    # 초기 활성 주파수와 총 에너지 소비
-   s.active_freqs = set()
-   s.freq_users = {freq: set() for freq in s.freq_config} # 주파수별 연결된 UE
-   s.total_energy_consumed = 0  # 총 에너지 소비 (Wh)
-   s.intervals_count = 0  # 15분 간격 카운트
+   self.active_freqs = set()
+   self.freq_users = {freq: set() for freq in self.freq_config} # 주파수별 연결된 UE
+   self.total_energy_consumed = 0  # 총 에너지 소비 (Wh)
+   self.intervals_count = 0  # 15분 간격 카운트
 
    # 주파수별 RB 수 초기화
-   s.rb_masks = {
+   self.rb_masks = {
        freq: np.ones(config['n_RBs'])
-       for freq, config in s.freq_config.items()
+       for freq, config in self.freq_config.items()
    }
 
-   s.base_power_W = 130.0  # 상시 전력 (W)
-   s.frequency_power_W = 100.0  # 주파수당 추가 전력 (W)
-   s.total_energy_consumed = 0.0  # 총 에너지 소비량 (Wh)
+   self.base_power_W = 130.0  # 상시 전력 (W)
+   self.frequency_power_W = 100.0  # 주파수당 추가 전력 (W)
+   self.total_energy_consumed = 0.0  # 총 에너지 소비량 (Wh)
 
-   s.rbs = simpy.Resource(s.sim.env, capacity=50)
-   s.pattern = pattern
-   s.f_callback = f_callback
-   s.f_callback_kwargs = f_callback_kwargs
-   s.MIMO_gain_dB = MIMO_gain_dB
-   s.attached = set()
+   self.rbs = simpy.Resource(self.sim.env, capacity=50)
+   self.pattern = pattern
+   self.f_callback = f_callback
+   self.f_callback_kwargs = f_callback_kwargs
+   self.MIMO_gain_dB = MIMO_gain_dB
+   self.attached = set()
 
    # 주파수별 리포트 관리
-   s.reports = {freq: {'cqi': {}, 'rsrp': {}, 'throughput_Mbps': {}}
-               for freq in s.freq_config.keys()}
-   s.rsrp_history = {freq: {} for freq in s.freq_config.keys()}
+   self.reports = {
+    freq: {
+        'cqi': {},
+        'rsrp': {},
+        'throughput_Mbps': {}
+    }
+    for freq in self.freq_config.keys()
+   }
+
+   self.rsrp_history = {freq: {} for freq in self.freq_config.keys()}
 
    if xyz is not None:
-     s.xyz = np.array(xyz)
+     self.xyz = np.array(xyz)
    else:
-     s.xyz = np.empty(3)
-     s.xyz[:2] = 100.0 + 900.0 * s.sim.rng.random(2)
-     s.xyz[2] = h_BS
+     self.xyz = np.empty(3)
+     self.xyz[:2] = 100.0 + 900.0 * self.rng.random(2)
+     self.xyz[2] = h_BS
 
-   if verbosity > 1: print(f'Cell[{s.i}] is at', s.xyz, file=stderr)
-   s.verbosity = verbosity
-   s.sim._set_hetnet()
+   if verbosity > 1: print(f'Cell[{self.i}] is at', self.xyz, file=stderr)
+   self.verbosity = verbosity
+   self.sim._set_hetnet()
 
+   # 이웃 셀 관리를 위한 속성 추가
+   self.neighbor_cells = []
+   self.sleep_thresholds = {800: 0.2, 1800: 0.3, 3600: 0.4}  # 주파수별 sleep 임계값
+   self.traffic_history = {freq: [] for freq in self.freq_config}  # 트래픽 이력 관리
 
+ def get_neighbor_cells(self):
+        """이웃 셀 목록 반환"""
+        if not self.neighbor_cells:
+            # 반경 1km 내의 셀들을 이웃으로 간주
+            for cell in self.sim.cells:
+                if cell.i != self.i:
+                    distance = np.linalg.norm(cell.xyz[:2] - self.xyz[:2])
+                    if distance <= 1000:  # 1km
+                        self.neighbor_cells.append(cell)
+        return self.neighbor_cells
 
- def update_energy_consumption(s):
-   """15분 간격으로 에너지 소비 업데이트"""
-   active_count = len(s.active_freqs)
-   energy_this_interval = s.energy_per_interval * active_count  # 25Wh * 활성 대역 수
+ def predict_traffic_surge(self, freq, window_size=4):
+        """단기 트래픽 증가 예측"""
+        if len(self.traffic_history[freq]) < window_size:
+            return False
+            
+        recent_loads = self.traffic_history[freq][-window_size:]
+        trend = np.polyfit(range(window_size), recent_loads, 1)[0]
+        return trend > 0.1  # 양의 기울기가 0.1 이상이면 증가 추세로 판단   
 
-   s.total_energy_consumed += energy_this_interval
-   s.intervals_count += 1
+ def can_shift_traffic(self, freq):
+        """트래픽 이동 가능 여부 확인"""
+        users = self.get_frequency_users(freq)
+        if not users:
+            return True
+            
+        # 다른 활성 주파수가 있는지 확인
+        alternative_freqs = [f for f in self.active_freqs if f != freq]
+        if not alternative_freqs:
+            return False
+            
+        # 각 사용자별로 다른 주파수로 이동 가능한지 확인
+        for user in users:
+            can_move = False
+            for alt_freq in alternative_freqs:
+                if self.can_satisfy_qos(alt_freq, self.get_frequency_load(alt_freq), user.qos_requirement):
+                    can_move = True
+                    break
+            if not can_move:
+                return False
+                
+        return True
 
-   # 활성화된 주파수 대역별로 에너지 소비 기록
-   for freq in s.active_freqs:
-       s.freq_config[freq]['energy_consumed'] += s.energy_per_interval
+ def redistribute_traffic(self, freq):
+        """트래픽 재분배"""
+        users = list(self.get_frequency_users(freq))
+        alternative_freqs = [f for f in self.active_freqs if f != freq]
+        
+        for user in users:
+            best_freq = None
+            best_score = -float('inf')
+            
+            for alt_freq in alternative_freqs:
+                load = self.get_frequency_load(alt_freq)
+                if self.can_satisfy_qos(alt_freq, load, user.qos_requirement):
+                    score = self.calculate_handover_score(
+                        user.measure_rsrp(self, alt_freq),
+                        load,
+                        alt_freq
+                    )
+                    if score > best_score:
+                        best_score = score
+                        best_freq = alt_freq
+                        
+            if best_freq:
+                self.freq_users[freq].remove(user)
+                self.freq_users[best_freq].add(user)
+                user.update_frequency(best_freq)
 
- def get_hourly_energy_consumption(s):
+ def get_sleep_threshold(self, freq):
+        """주파수별 sleep 임계값 반환"""
+        return self.sleep_thresholds.get(freq, 0.3)  # 기본값 0.3
+
+ def calculate_avg_throughput(self, freq):
+        """주파수별 평균 처리량 계산"""
+        users = self.get_frequency_users(freq)
+        if not users:
+            return 0
+            
+        total_throughput = sum(self.get_UE_throughput(user.i, freq) for user in users)
+        return total_throughput / len(users)         
+
+ def update_energy_consumption(self):
+    """15분 간격으로 에너지 소비 업데이트"""
+    # 시간 단위 변환 확인 필요
+    active_count = len(self.active_freqs)
+    
+    # 기본 전력 + 주파수당 추가 전력 고려
+    total_power = self.base_power_W + (self.frequency_power_W * active_count)
+    energy_this_interval = (total_power * self.interval) / 3600  # Wh 단위로 변환
+    
+    self.total_energy_consumed += energy_this_interval
+    self.intervals_count += 1
+    
+    # 주파수별 에너지 소비 분배
+    if active_count > 0:
+        energy_per_freq = energy_this_interval / active_count
+        for freq in self.active_freqs:
+            self.freq_config[freq]['energy_consumed'] += energy_per_freq
+
+ def get_hourly_energy_consumption(self):
    """시간당 에너지 소비량 계산"""
-   hourly_rate = len(s.active_freqs) * 100  # 시간당 100Wh * 활성 대역 수
+   hourly_rate = len(self.active_freqs) * 100  # 시간당 100Wh * 활성 대역 수
    return hourly_rate
 
- def get_energy_stats(s):
+ 
+
+ def get_energy_stats(self):
    """에너지 소비 통계 반환"""
-   hours_elapsed = s.intervals_count / 4  # 15분 간격을 시간으로 변환
+   hours_elapsed = self.intervals_count / 4  # 15분 간격을 시간으로 변환
    return {
-       'total_energy_consumed': s.total_energy_consumed,  # 총 에너지 소비 (Wh)
+       'total_energy_consumed': self.total_energy_consumed,  # 총 에너지 소비 (Wh)
        'hours_elapsed': hours_elapsed,
-       'active_bands': len(s.active_freqs),
-       'hourly_consumption_rate': s.get_hourly_energy_consumption(),
+       'active_bands': len(self.active_freqs),
+       'hourly_consumption_rate': self.get_hourly_energy_consumption(),
        'per_frequency': {
            freq: {
-               'active': s.freq_config[freq]['active'],
-               'energy_consumed': s.freq_config[freq]['energy_consumed']  # Wh
+               'active': self.freq_config[freq]['active'],
+               'energy_consumed': self.freq_config[freq]['energy_consumed']  # Wh
            }
-           for freq in s.freq_config
+           for freq in self.freq_config
        }
    }
 
@@ -238,143 +341,124 @@ class Cell:
 
 
 
- def activate_frequency(s, freq):
+ def activate_frequency(self, freq):
    """주파수 대역 활성화"""
-   if freq in s.freq_config and not s.freq_config[freq]['active']:
-       s.freq_config[freq]['active'] = True
-       s.active_freqs.add(freq)
+   if freq in self.freq_config and not self.freq_config[freq]['active']:
+       self.freq_config[freq]['active'] = True
+       self.active_freqs.add(freq)
        return True
    return False
 
- def deactivate_frequency(s, freq):
+ def deactivate_frequency(self, freq):
    """주파수 대역 비활성화"""
-   if freq in s.freq_config and s.freq_config[freq]['active']:
-       s.freq_config[freq]['active'] = False
-       s.active_freqs.remove(freq)
+   if freq in self.freq_config and self.freq_config[freq]['active']:
+       self.freq_config[freq]['active'] = False
+       self.active_freqs.remove(freq)
        return True
    return False
 
- def set_frequency(s, freq):
+ def set_frequency(self, freq):
    """활성 주파수 변경"""
-   if freq in s.freq_config and s.freq_config[freq]['active']:
-       s.active_freq = freq
+   if freq in self.freq_config and self.freq_config[freq]['active']:
+       self.active_freq = freq
        return True
    return False
 
- def get_active_frequencies(s):
+ def get_active_frequencies(self):
    """활성화된 주파수 대역 목록 반환"""
-   return list(s.active_freqs)
+   return list(self.active_freqs)
 
- def set_rb_mask(s, mask, freq=None):
+ def set_rb_mask(self, mask, freq=None):
    """특정 주파수의 RB 마스크 설정"""
    if freq is None:
-       freq = min(s.active_freqs) if s.active_freqs else list(s.freq_config.keys())[0]
-   if freq in s.freq_config:
-       if len(mask) == s.freq_config[freq]['n_RBs']:
-           s.rb_masks[freq] = np.array(mask)
+       freq = min(self.active_freqs) if self.active_freqs else list(self.freq_config.keys())[0]
+   if freq in self.freq_config:
+       if len(mask) == self.freq_config[freq]['n_RBs']:
+           self.rb_masks[freq] = np.array(mask)
            return True
    return False
 
- def get_rb_mask(s, freq=None):
+ def get_rb_mask(self, freq=None):
    """특정 주파수의 RB 마스크 반환"""
    if freq is None:
-       freq = min(s.active_freqs) if s.active_freqs else list(s.freq_config.keys())[0]
-   return s.rb_masks.get(freq)
+       freq = min(self.active_freqs) if self.active_freqs else list(self.freq_config.keys())[0]
+   return self.rb_masks.get(freq)
 
- def get_rsrp(s, i, freq=None):
+ def get_rsrp(self, i, freq=None):
    """주파수별 RSRP 반환"""
    if freq is None:
-       freq = min(s.active_freqs) if s.active_freqs else list(s.freq_config.keys())[0]
-   if not s.freq_config[freq]['active']:
+       freq = min(s.active_freqs) if s.active_freqs else list(self.freq_config.keys())[0]
+   if not self.freq_config[freq]['active']:
        return -np.inf
-   if i in s.reports[freq]['rsrp']:
-       rsrp = s.reports[freq]['rsrp'][i][1]
+   if i in self.reports[freq]['rsrp']:
+       rsrp = self.reports[freq]['rsrp'][i][1]
        freq_factor = (freq/800.0)**2
        return rsrp - 10*np.log10(freq_factor)
    return -np.inf
 
- def get_UE_throughput(s, ue_i, freq=None):  
+ def get_UE_throughput(self, ue_i, freq=None):  
    """주파수별 UE 처리량 반환"""
    if freq is None:
-       freq = min(s.active_freqs) if s.active_freqs else list(s.freq_config.keys())[0]
-   reports = s.reports[freq]['throughput_Mbps']
+       freq = min(self.active_freqs) if self.active_freqs else list(self.freq_config.keys())[0]
+   reports = self.reports[freq]['throughput_Mbps']
    if ue_i in reports:
        # RB 기반 처리량 계산
-       n_rbs = s.freq_config[freq]['n_RBs']
-       rb_mask = s.rb_masks[freq]
+       n_rbs = self.freq_config[freq]['n_RBs']
+       rb_mask = self.rb_masks[freq]
        return reports[ue_i][1] * (rb_mask.sum() / n_rbs)
    return -np.inf
 
- def get_UE_CQI(s, ue_i, freq=None):
+ def get_UE_CQI(self, ue_i, freq=None):
    """주파수별 CQI 반환"""
    if freq is None:
-       freq = min(s.active_freqs) if s.active_freqs else list(s.freq_config.keys())[0]
-   reports = s.reports[freq]['cqi']
-   return reports[ue_i][1] if ue_i in reports else np.nan*np.ones(s.freq_config[freq]['n_subbands'])
+       freq = min(self.active_freqs) if self.active_freqs else list(self.freq_config.keys())[0]
+   reports = self.reports[freq]['cqi']
+   return reports[ue_i][1] if ue_i in reports else np.nan*np.ones(self.freq_config[freq]['n_RBs'])
 
- def set_pattern(s,pattern):
+ def set_pattern(self,pattern):
    """Set the antenna radiation pattern."""
-   s.pattern = pattern
+   self.pattern = pattern
 
- def set_MIMO_gain(s,MIMO_gain_dB): 
+ def set_MIMO_gain(self,MIMO_gain_dB): 
    """Set the MIMO gain in dB."""
-   s.MIMO_gain_dB = MIMO_gain_dB
+   self.MIMO_gain_dB = MIMO_gain_dB
 
- def get_xyz(s):
+ def get_xyz(self):
    """Return cell position."""
-   return s.xyz
+   return self.xyz
 
- def set_xyz(s,xyz):
+ def set_xyz(self,xyz):
    """Set cell position."""
-   s.xyz = np.array(xyz)
-   s.sim.cell_locations[s.i] = s.xyz
-   print(f'Cell[{s.i}] is now at {s.xyz}',file=stderr)
+   self.xyz = np.array(xyz)
+   self.sim.cell_locations[self.i] = self.xyz
+   print(f'Cell[{self.i}] is now at {self.xyz}',file=stderr)
 
- def get_nattached(s):
+ def get_nattached(self):
    """Return number of attached UEs."""
-   return len(s.attached)
+   return len(self.attached)
 
- def loop(s):
+ def loop(self):
     while True:
-        num_active_freqs = len(s.active_freqs)
-        total_power_W = s.base_power_W + s.frequency_power_W * num_active_freqs
-        energy_consumed = total_power_W * (s.interval / 3600)
-        s.total_energy_consumed += energy_consumed
+        num_active_freqs = len(self.active_freqs)
+        total_power_W = self.base_power_W + self.frequency_power_W * num_active_freqs
+        energy_consumed = total_power_W * (self.interval / 3600)
+        self.total_energy_consumed += energy_consumed
 
         # Callback
-        if s.f_callback is not None:
-            s.f_callback(s, **s.f_callback_kwargs)
-        yield s.sim.env.timeout(s.interval)
+        if self.f_callback is not None:
+            self.f_callback(self, **self.f_callback_kwargs)
+        yield self.sim.env.timeout(self.interval)
 
- def monitor_rbs(s):
+ def monitor_rbs(self):
    while True:
-     if s.rbs.queue:
-       if s.verbosity>0: print(f'rbs at {s.sim.env.now:.2f} ={s.rbs.count}')
-     yield s.sim.env.timeout(5.0)
+     if self.rbs.queue:
+       if self.verbosity>0: print(f'rbs at {self.sim.env.now:.2f} ={self.rbs.count}')
+     yield self.sim.env.timeout(5.0)
 
- def __repr__(s):
-   return f'Cell(index={s.i},xyz={s.xyz})'
+ def __repr__(self):
+   return f'Cell(index={self.i},xyz={self.xyz})'
 
  def select_frequency_by_qos(self, ue, service_type, qos_requirement):
-    """
-    QoS 요구사항을 고려한 주파수 선택
-    """
-    priorities = self.get_frequency_priority(service_type)
-    
-    for freq in priorities:
-        if not self.freq_config[freq]['active']:
-            continue
-            
-        # 해당 주파수 대역의 현재 로드 확인
-        current_load = self.get_frequency_load(freq)
-        
-        # QoS 만족 가능 여부 체크
-        if self.can_satisfy_qos(freq, current_load, qos_requirement):
-            return freq
-            
-    return None  # 적절한 주파수를 찾지 못한 경우
-
-  def select_frequency_by_qos(self, ue, service_type, qos_requirement):
     """
     QoS 요구사항을 고려한 주파수 선택
     """
@@ -399,13 +483,17 @@ class Cell:
     required_bandwidth = qos_requirement.get('min_bandwidth', 0)
     return available_bandwidth >= required_bandwidth
 
-  def get_frequency_load(s, freq):
+  def get_frequency_load(self, freq):
     """주파수별 현재 RB 사용률 계산"""
-    if not s.freq_config[freq]['active']:
-        return 1.0  # 비활성 주파수는 최대 부하로 표시
+    # freq가 유효한지 검사 추가
+    if freq not in self.freq_config:
+        raise ValueError(f"Invalid frequency: {freq}")
         
-    total_rbs = s.freq_config[freq]['n_RBs']
-    used_rbs = sum(1 for rb in s.rb_masks[freq] if rb == 1)
+    if not self.freq_config[freq]['active']:
+        return 1.0
+        
+    total_rbs = self.freq_config[freq]['n_RBs']
+    used_rbs = sum(1 for rb in self.rb_masks[freq] if rb == 1)
     return used_rbs / total_rbs
 
   def get_frequency_users(self, freq):
@@ -439,22 +527,20 @@ class Cell:
     return rsrp * coverage_weight[freq] * (1 - load)
 
   def generate_frequency_metrics(self):
-    """
-    주파수별 성능 지표 생성
-    """
-    metrics = {}
-    for freq in self.freq_config:
-        if not self.freq_config[freq]['active']:
-            continue
-             d
-        metrics[freq] = {
-            'capacity_utilization': self.get_frequency_load(freq),
-            'connected_users': len(self.get_frequency_users(freq)),
-            'average_throughput': self.calculate_avg_throughput(freq),
-            'energy_efficiency': self.calculate_energy_efficiency(freq)
-        }
-    
-    return metrics
+        """주파수별 성능 지표 생성"""
+        metrics = {}
+        for freq in self.freq_config:
+            if not self.freq_config[freq]['active']:
+                continue
+                
+            metrics[freq] = {
+                'capacity_utilization': self.get_frequency_load(freq),
+                'connected_users': len(self.get_frequency_users(freq)),
+                'average_throughput': self.calculate_avg_throughput(freq),
+                'energy_efficiency': self.calculate_energy_efficiency(freq)
+            }
+        
+        return metrics
 
   def calculate_energy_efficiency(self, freq):
     """주파수별 에너지 효율성 계산"""
@@ -465,8 +551,25 @@ class Cell:
     energy_consumed = self.freq_config[freq]['energy_consumed']
     return total_throughput / energy_consumed if energy_consumed > 0 else 0
 
-  
-  
+  def evaluate_sleep_condition(self, freq):
+    """주파수별 sleep 조건 평가"""
+    traffic_load = self.get_frequency_load(freq)
+    threshold = self.get_sleep_threshold(freq)
+    
+    if traffic_load < threshold:
+        # 단기 트래픽 예측 확인
+        if not self.predict_traffic_surge(freq):
+            return True
+    return False
+
+  def activate_sleep_mode(self, freq):
+    """주파수별 sleep 모드 활성화"""
+    if self.can_shift_traffic(freq):
+        self.deactivate_frequency(freq)
+        self.redistribute_traffic(freq)
+        return True
+    return False  
+
 # END class Cell
 
 class UE:
@@ -682,7 +785,7 @@ class UE:
     Also saves the CQI[1]s in s.cqi, and returns the throughput value.
     '''
     if s.serving_cell is None: return 0.0 # 2022-08-08 detached
-    interference=from_dB(s.noise_power_dBm)*np.ones(s.serving_cell.n_subbands)
+    interference=from_dB(s.noise_power_dBm)*np.ones(s.serving_cell.n_RBs)
     for cell in s.sim.cells:
       pl_dB=s.pathloss(cell.xyz,s.xyz)
       antenna_gain_dB=0.0
@@ -702,7 +805,7 @@ class UE:
     spectral_efficiency=np.array([CQI_to_64QAM_efficiency(cqi_i) for cqi_i in cqi])
     now=float(s.sim.env.now)
     # per-UE throughput...
-    throughput_Mbps=s.serving_cell.bw_MHz*(spectral_efficiency@s.serving_cell.subband_mask)/s.serving_cell.n_subbands/len(s.serving_cell.attached)
+    throughput_Mbps=s.serving_cell.bw_MHz*(spectral_efficiency@s.serving_cell.subband_mask)/s.serving_cell.n_RBs/len(s.serving_cell.attached)
     s.serving_cell.reports['cqi'][s.i]=(now,cqi)
     s.serving_cell.reports['throughput_Mbps'][s.i]=(now,throughput_Mbps,)
     return throughput_Mbps
@@ -1166,10 +1269,10 @@ if __name__=='__main__': # a simple self-test
             s.f.write(f'{s.sim.env.now:.1f}\t{xy}\t{cqi}\t{tp}\n')
         yield s.sim.env.timeout(s.logging_interval)
 
-  def test_01(ncells=4,nues=9,n_subbands=2,until=1000.0):
+  def test_01(ncells=4,nues=9,n_RBs=2,until=1000.0):
     sim=Sim()
     for i in range(ncells):
-      sim.make_cell(n_subbands=n_subbands,MIMO_gain_dB=3.0,verbosity=0)
+      sim.make_cell(n_RBs=n_RBs,MIMO_gain_dB=3.0,verbosity=0)
     sim.cells[0].set_xyz((500.0,500.0,20.0)) # fix cell[0]
     for i in range(nues):
       ue=sim.make_UE(verbosity=1)
